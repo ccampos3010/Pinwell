@@ -35,6 +35,11 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var lastUI = 0.0
     private let motion = CMMotionManager()
     private var config: ARWorldTrackingConfiguration?
+    private var viewerDistance: Float = PinMath.defaultViewInches * 0.0254
+    private var viewerRight: Float = 0
+    private var viewerUp: Float = 0
+    private var faceTracking = false
+    private var droppedFace = false
 
     override init() {
         let n = 32 * PinMath.rows(for: 32)
@@ -103,6 +108,10 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         config.frameSemantics = semantics
         config.planeDetection = []
         config.environmentTexturing = .none
+        if ARWorldTrackingConfiguration.supportsUserFaceTracking {
+            config.userFaceTrackingEnabled = true
+            faceTracking = true
+        }
         self.config = config
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
         publish(lidar: .live, posture: "Sensor", hint: liveHint, sliding: false)
@@ -114,7 +123,15 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         motion.stopDeviceMotionUpdates()
     }
 
-    /// Called on the SceneKit render thread.
+    /// Eye position above the board. Falls back to 12 inches, straight on, until a face is tracked.
+    func viewerEye() -> SIMD3<Float> {
+        lock.lock()
+        let d = viewerDistance
+        let r = viewerRight
+        let u = viewerUp
+        lock.unlock()
+        return PinMath.eye(distanceM: d, rightM: r, upM: u)
+    }
     func step(dt: Double) -> (cols: Int, rows: Int, shown: [Float]) {
         let dtF = Float(min(0.05, max(0, dt)))
         lock.lock()
@@ -138,7 +155,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
             let posture = settling ? "Sliding" : (near > 0 && near < PinMath.contactM ? "Pressing" : "Sensor")
             let hint = settling
                 ? (armed
-                    ? "Sliding back. Tilt up to pause — about 3 seconds from fully out to flush."
+                    ? "Sliding back. Tilt up to pause \u2014 about 3 seconds from fully out to flush."
                     : "Sliding back. About 3 seconds from fully out to flush.")
                 : liveHint
             DispatchQueue.main.async { [weak self] in
@@ -153,6 +170,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        noteViewer(frame)
         let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
         guard let depthMap else { return }
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
@@ -184,6 +202,13 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
                 hint: "Camera access is off. Turn it on in Settings for Pinwell.",
                 sliding: false
             )
+            return
+        }
+        if faceTracking, !droppedFace, let config {
+            droppedFace = true
+            faceTracking = false
+            config.userFaceTrackingEnabled = false
+            session.run(config, options: [.resetTracking, .removeExistingAnchors])
         }
     }
 
@@ -191,6 +216,20 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
 
     func sessionInterruptionEnded(_ session: ARSession) {
         if let config { session.run(config, options: []) }
+    }
+
+    private func noteViewer(_ frame: ARFrame) {
+        guard let face = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first else { return }
+        let faceInView = simd_mul(frame.camera.viewMatrix(for: .portrait), face.transform)
+        let p = faceInView.columns.3
+        let distance = min(0.9, max(0.18, abs(p.z)))
+        let right = min(0.12, max(-0.12, p.x))
+        let up = min(0.12, max(-0.12, p.y))
+        lock.lock()
+        viewerDistance += (distance - viewerDistance) * 0.2
+        viewerRight += (right - viewerRight) * 0.2
+        viewerUp += (up - viewerUp) * 0.2
+        lock.unlock()
     }
 
     private func copyDepth(

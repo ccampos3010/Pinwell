@@ -33,7 +33,7 @@
 	<key>UIUserInterfaceStyle</key>
 	<string>Dark</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Pinwell uses the LiDAR camera to press the pins when something is within 25 cm.</string>
+	<string>Pinwell reads the rear LiDAR sensor for the pins, and uses the front camera only to match the view to where you are looking. It does not show either picture.</string>
 	<key>NSMotionUsageDescription</key>
 	<string>Pinwell slides the pins back when you lay the screen flat toward the sky.</string>
 </dict>

@@ -1,4 +1,5 @@
 import SceneKit
+import simd
 import SwiftUI
 
 struct PinSceneView: UIViewRepresentable {
@@ -8,7 +9,7 @@ struct PinSceneView: UIViewRepresentable {
         let view = SCNView()
         view.scene = context.coordinator.scene
         view.pointOfView = context.coordinator.camera
-        view.backgroundColor = UIColor(red: 0.071, green: 0.063, blue: 0.055, alpha: 1)
+        view.backgroundColor = UIColor(red: 0.05, green: 0.045, blue: 0.04, alpha: 1)
         view.antialiasingMode = .multisampling2X
         view.rendersContinuously = true
         view.delegate = context.coordinator
@@ -20,6 +21,7 @@ struct PinSceneView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         context.coordinator.owner = model
+        context.coordinator.frameCamera(viewSize: uiView.bounds.size)
         model.setViewport(uiView.bounds.size)
     }
 
@@ -38,21 +40,58 @@ struct PinSceneView: UIViewRepresentable {
         private var last = 0.0
         var owner: BoardModel?
         private let shaftGeo: SCNCylinder
-        private let capGeo: SCNCylinder
+        private let capGeo: SCNSphere
         private let shaftMat = SCNMaterial()
         private let capMat = SCNMaterial()
 
         override init() {
             shaftGeo = SCNCylinder(radius: 1, height: 1)
-            shaftGeo.radialSegmentCount = 7
-            capGeo = SCNCylinder(radius: 1, height: 1)
-            capGeo.radialSegmentCount = 10
+            shaftGeo.radialSegmentCount = 14
+            capGeo = SCNSphere(radius: 1)
+            capGeo.segmentCount = 16
             super.init()
-            metal(shaftMat, rough: 0.46)
-            metal(capMat, rough: 0.28)
+            metal(shaftMat, rough: 0.38, shade: 0.62)
+            metal(capMat, rough: 0.16, shade: 0.86)
             shaftGeo.materials = [shaftMat]
             capGeo.materials = [capMat]
             buildStudio()
+        }
+
+        func frameCamera(viewSize: CGSize) {
+            guard viewSize.width > 2, viewSize.height > 2 else { return }
+            let eye = owner?.viewerEye() ?? PinMath.eye(
+                distanceM: PinMath.defaultViewInches * 0.0254,
+                rightM: 0,
+                upM: 0
+            )
+            camera.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+            camera.position = SCNVector3(eye.x, eye.y, eye.z)
+            let near: Float = 0.05
+            let far: Float = 40
+            let d = max(eye.y, near * 4)
+            let left = (-PinMath.boardW / 2 - eye.x) * near / d
+            let right = (PinMath.boardW / 2 - eye.x) * near / d
+            let bottom = (-PinMath.boardH / 2 + eye.z) * near / d
+            let top = (PinMath.boardH / 2 + eye.z) * near / d
+            camera.camera?.usesOrthographicProjection = false
+            camera.camera?.projectionTransform = SCNMatrix4(Self.frustum(
+                left: left, right: right, bottom: bottom, top: top, near: near, far: far
+            ))
+        }
+
+        /// Straight down. An off-center eye shifts the pins, not the board on the glass.
+        private static func frustum(
+            left: Float, right: Float, bottom: Float, top: Float, near: Float, far: Float
+        ) -> simd_float4x4 {
+            let rl = right - left
+            let tb = top - bottom
+            let fn = far - near
+            return simd_float4x4(columns: (
+                SIMD4(2 * near / rl, 0, 0, 0),
+                SIMD4(0, 2 * near / tb, 0, 0),
+                SIMD4((right + left) / rl, (top + bottom) / tb, -(far + near) / fn, -1),
+                SIMD4(0, 0, -2 * far * near / fn, 0)
+            ))
         }
 
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
@@ -66,86 +105,85 @@ struct PinSceneView: UIViewRepresentable {
             let n = min(frame.shown.count, shafts.count)
             guard frame.cols > 0, frame.rows > 0 else { return }
             let pitch = min(PinMath.boardW / Float(frame.cols), PinMath.boardH / Float(frame.rows))
-            let shaftR = pitch * 0.22
-            let capR = pitch * 0.36
-            let capT = max(Float(0.008), pitch * 0.42)
+            let shaftR = pitch * 0.135
+            let capR = pitch * 0.34
             for i in 0..<n {
                 let h = PinMath.height(frame.shown[i])
                 let x = ((Float(i % frame.cols) + 0.5) / Float(frame.cols)) * PinMath.boardW - PinMath.boardW / 2
-                let y = PinMath.boardH / 2 - ((Float(i / frame.cols) + 0.5) / Float(frame.rows)) * PinMath.boardH
-                shafts[i].simdPosition = SIMD3(x, y, h * 0.5)
+                let z = PinMath.boardH / 2 - ((Float(i / frame.cols) + 0.5) / Float(frame.rows)) * PinMath.boardH
+                shafts[i].simdPosition = SIMD3(x, h * 0.5, z)
                 shafts[i].simdScale = SIMD3(shaftR, h, shaftR)
-                caps[i].simdPosition = SIMD3(x, y, h + capT * 0.5)
-                caps[i].simdScale = SIMD3(capR, capT, capR)
+                caps[i].simdPosition = SIMD3(x, h + capR * 0.62, z)
+                caps[i].simdScale = SIMD3(capR, capR * 0.82, capR)
             }
         }
 
-        private func metal(_ mat: SCNMaterial, rough: CGFloat) {
+        private func metal(_ mat: SCNMaterial, rough: CGFloat, shade: CGFloat) {
             mat.lightingModel = .physicallyBased
-            mat.diffuse.contents = UIColor(red: 0.78, green: 0.80, blue: 0.84, alpha: 1)
-            mat.metalness.contents = 0.64
+            mat.diffuse.contents = UIColor(white: shade, alpha: 1)
+            mat.metalness.contents = 0.86
             mat.roughness.contents = rough
         }
 
         private func buildStudio() {
-            board.eulerAngles = SCNVector3(-0.42, 0.08, 0)
             scene.rootNode.addChildNode(board)
 
             let plate = SCNNode(geometry: SCNPlane(width: CGFloat(PinMath.boardW), height: CGFloat(PinMath.boardH)))
+            plate.eulerAngles.x = -.pi / 2
             plate.geometry?.firstMaterial?.lightingModel = .physicallyBased
-            plate.geometry?.firstMaterial?.diffuse.contents = UIColor(red: 0.063, green: 0.055, blue: 0.047, alpha: 1)
-            plate.geometry?.firstMaterial?.roughness.contents = 0.9
-            plate.geometry?.firstMaterial?.metalness.contents = 0.04
+            plate.geometry?.firstMaterial?.diffuse.contents = UIColor(red: 0.045, green: 0.04, blue: 0.036, alpha: 1)
+            plate.geometry?.firstMaterial?.roughness.contents = 0.92
+            plate.geometry?.firstMaterial?.metalness.contents = 0.02
             board.addChildNode(plate)
 
             let frame = SCNMaterial()
             frame.lightingModel = .physicallyBased
-            frame.diffuse.contents = UIColor(red: 0.086, green: 0.075, blue: 0.067, alpha: 1)
-            frame.roughness.contents = 0.58
-            frame.metalness.contents = 0.22
-            let t: CGFloat = 0.062
+            frame.diffuse.contents = UIColor(red: 0.09, green: 0.08, blue: 0.07, alpha: 1)
+            frame.roughness.contents = 0.55
+            frame.metalness.contents = 0.28
+            let t: CGFloat = 0.045
             let hw = CGFloat(PinMath.boardW) / 2
             let hh = CGFloat(PinMath.boardH) / 2
             let bars: [(CGFloat, CGFloat, CGFloat, Float, Float)] = [
-                (CGFloat(PinMath.boardW) + t * 2, t, 0.07, 0, Float(hh + t / 2)),
-                (CGFloat(PinMath.boardW) + t * 2, t, 0.07, 0, -Float(hh + t / 2)),
-                (t, CGFloat(PinMath.boardH), 0.07, -Float(hw + t / 2), 0),
-                (t, CGFloat(PinMath.boardH), 0.07, Float(hw + t / 2), 0),
+                (CGFloat(PinMath.boardW) + t * 2, t, 0.05, 0, Float(hh + t / 2)),
+                (CGFloat(PinMath.boardW) + t * 2, t, 0.05, 0, -Float(hh + t / 2)),
+                (t, CGFloat(PinMath.boardH), 0.05, -Float(hw + t / 2), 0),
+                (t, CGFloat(PinMath.boardH), 0.05, Float(hw + t / 2), 0),
             ]
-            for (w, h, d, x, y) in bars {
-                let box = SCNBox(width: w, height: h, length: d, chamferRadius: 0.004)
+            for (w, h, d, x, z) in bars {
+                let box = SCNBox(width: w, height: d, length: h, chamferRadius: 0.004)
                 box.materials = [frame]
                 let node = SCNNode(geometry: box)
-                node.position = SCNVector3(x, y, 0)
+                node.position = SCNVector3(x, 0.012, z)
                 board.addChildNode(node)
             }
 
             camera.camera = SCNCamera()
-            camera.camera?.fieldOfView = 32
-            camera.camera?.zNear = 0.04
+            camera.camera?.fieldOfView = 42
+            camera.camera?.zNear = 0.02
             camera.camera?.zFar = 20
-            camera.position = SCNVector3(0.95, 0.42, 2.25)
-            camera.look(at: SCNVector3(0, -0.02, 0.05))
+            frameCamera(viewSize: CGSize(width: 390, height: 844))
             scene.rootNode.addChildNode(camera)
 
-            func lamp(_ intensity: CGFloat, _ color: UIColor, _ euler: SCNVector3) {
+            let ambient = SCNNode()
+            ambient.light = SCNLight()
+            ambient.light?.type = .ambient
+            ambient.light?.intensity = 180
+            ambient.light?.color = UIColor(white: 0.92, alpha: 1)
+            scene.rootNode.addChildNode(ambient)
+
+            func lamp(_ intensity: CGFloat, _ euler: SCNVector3) {
                 let node = SCNNode()
                 let light = SCNLight()
                 light.type = .directional
                 light.intensity = intensity
-                light.color = color
+                light.color = UIColor(white: 1, alpha: 1)
                 node.light = light
                 node.eulerAngles = euler
                 scene.rootNode.addChildNode(node)
             }
-            let ambient = SCNNode()
-            ambient.light = SCNLight()
-            ambient.light?.type = .ambient
-            ambient.light?.intensity = 220
-            ambient.light?.color = UIColor(red: 1, green: 0.95, blue: 0.88, alpha: 1)
-            scene.rootNode.addChildNode(ambient)
-            lamp(1100, UIColor(red: 1, green: 0.96, blue: 0.9, alpha: 1), SCNVector3(-0.9, 0.45, 0))
-            lamp(420, UIColor(red: 0.82, green: 0.88, blue: 0.95, alpha: 1), SCNVector3(-0.2, -1.2, 0))
+            lamp(980, SCNVector3(-1.15, 0.15, 0))
+            lamp(260, SCNVector3(-0.4, 2.2, 0))
         }
 
         private func rebuild(cols: Int, rows: Int) {
@@ -158,9 +196,7 @@ struct PinSceneView: UIViewRepresentable {
             caps.reserveCapacity(count)
             for _ in 0..<count {
                 let shaft = SCNNode(geometry: shaftGeo)
-                shaft.simdEulerAngles = SIMD3(Float.pi / 2, 0, 0)
                 let cap = SCNNode(geometry: capGeo)
-                cap.simdEulerAngles = SIMD3(Float.pi / 2, 0, 0)
                 board.addChildNode(shaft)
                 board.addChildNode(cap)
                 shafts.append(shaft)

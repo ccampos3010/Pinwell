@@ -9,11 +9,26 @@ enum PinMath {
     static let fullResetSec: Float = 3
     static let engageDeg = 8.0
     static let releaseDeg = 10.0
-    static let boardW: Float = 1.16
-    static let boardH: Float = 1.56
+    static let boardW: Float = 1.02
+    static let boardH: Float = 2.16
+    /// iPhone 16 Pro glass, used so a 12-inch viewing distance matches the screen.
+    static let screenWInches: Float = 2.622
+    static let screenHInches: Float = 5.700
+    static let defaultViewInches: Float = 12
+
+    static var defaultEyeDistance: Float { boardH * defaultViewInches / screenHInches }
+
+    /// Eye position in board units. The board fills the glass. Y is above the pins.
+    static func eye(distanceM: Float, rightM: Float, upM: Float) -> SIMD3<Float> {
+        let d = min(0.9, max(0.18, distanceM))
+        let y = d / (screenHInches * 0.0254) * boardH
+        let x = rightM / (screenWInches * 0.0254) * boardW
+        let z = -upM / (screenHInches * 0.0254) * boardH
+        return SIMD3(x, y, z)
+    }
 
     static func rows(for cols: Int) -> Int {
-        max(8, Int((Double(cols) * 1.32).rounded()))
+        max(10, Int((Double(cols) * Double(boardH / boardW)).rounded()))
     }
 
     static func clampCols(_ n: Int) -> Int {
