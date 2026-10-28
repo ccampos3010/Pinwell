@@ -1,5 +1,7 @@
 import ARKit
+import AVFoundation
 import CoreMotion
+import CoreVideo
 import QuartzCore
 import UIKit
 
@@ -17,9 +19,14 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var rows = PinMath.rows(for: 32)
     @Published var nearestCM: Int?
     @Published var posture = "Starting"
-    @Published var hint = "Starting the LiDAR camera."
+    @Published var hint = "Starting the front depth camera."
     @Published var lidar: LidarState = .checking
     @Published var sliding = false
+    @Published var showsDepth = false
+    @Published var startCM = 25
+    @Published var spanCM = 10
+    @Published var pinScale = 0.5
+    @Published var depthImage: UIImage?
 
     private let lock = NSLock()
     private var gridCols = 32
@@ -33,13 +40,16 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var skyArmed = false
     private var viewport = CGSize(width: 390, height: 844)
     private var lastUI = 0.0
+    private var lastDepthImage = 0.0
     private let motion = CMMotionManager()
-    private var config: ARWorldTrackingConfiguration?
+    private var config: ARFaceTrackingConfiguration?
     private var viewerDistance: Float = PinMath.defaultViewInches * 0.0254
     private var viewerRight: Float = 0
     private var viewerUp: Float = 0
-    private var faceTracking = false
-    private var droppedFace = false
+    private var startM: Float = 0.25
+    private var spanM: Float = 0.10
+    private var scale: Float = 0.5
+    private var wantDepth = false
 
     override init() {
         let n = 32 * PinMath.rows(for: 32)
@@ -56,6 +66,37 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         lock.lock()
         viewport = size
         lock.unlock()
+    }
+
+    func setStartCM(_ cm: Int) {
+        let v = min(100, max(10, cm))
+        lock.lock()
+        startM = Float(v) / 100
+        lock.unlock()
+        startCM = v
+    }
+
+    func setSpanCM(_ cm: Int) {
+        let v = min(40, max(2, cm))
+        lock.lock()
+        spanM = Float(v) / 100
+        lock.unlock()
+        spanCM = v
+    }
+
+    func setPinScale(_ value: Double) {
+        let v = min(2, max(0.1, value))
+        lock.lock()
+        scale = Float(v)
+        lock.unlock()
+        pinScale = v
+    }
+
+    func setShowsDepth(_ on: Bool) {
+        lock.lock()
+        wantDepth = on
+        lock.unlock()
+        showsDepth = on
     }
 
     func setCols(_ next: Int) {
@@ -91,27 +132,12 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func start() {
-        guard ARWorldTrackingConfiguration.isSupported else {
-            publish(lidar: .missing, posture: "No LiDAR", hint: missingHint, sliding: false)
+        guard ARFaceTrackingConfiguration.isSupported else {
+            publish(lidar: .missing, posture: "No TrueDepth", hint: missingHint, sliding: false)
             return
         }
-        let semantics: ARConfiguration.FrameSemantics
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            semantics = .smoothedSceneDepth
-        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            semantics = .sceneDepth
-        } else {
-            publish(lidar: .missing, posture: "No LiDAR", hint: missingHint, sliding: false)
-            return
-        }
-        let config = ARWorldTrackingConfiguration()
-        config.frameSemantics = semantics
-        config.planeDetection = []
-        config.environmentTexturing = .none
-        if ARWorldTrackingConfiguration.supportsUserFaceTracking {
-            config.userFaceTrackingEnabled = true
-            faceTracking = true
-        }
+        let config = ARFaceTrackingConfiguration()
+        config.isLightEstimationEnabled = false
         self.config = config
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
         publish(lidar: .live, posture: "Sensor", hint: liveHint, sliding: false)
@@ -132,7 +158,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         lock.unlock()
         return PinMath.eye(distanceM: d, rightM: r, upM: u)
     }
-    func step(dt: Double) -> (cols: Int, rows: Int, shown: [Float]) {
+    func step(dt: Double) -> (cols: Int, rows: Int, shown: [Float], scale: Float) {
         let dtF = Float(min(0.05, max(0, dt)))
         lock.lock()
         let settling = skyFlat
@@ -146,13 +172,15 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         let rows = gridRows
         let near = nearest
         let armed = skyArmed
+        let pinScale = self.scale
+        let start = startM
         lock.unlock()
 
         let now = CACurrentMediaTime()
         if now - lastUI > 0.14 {
             lastUI = now
             let cm: Int? = near > 0 ? Int((near * 100).rounded()) : nil
-            let posture = settling ? "Sliding" : (near > 0 && near < PinMath.contactM ? "Pressing" : "Sensor")
+            let posture = settling ? "Sliding" : (near > 0 && near < start ? "Pressing" : "Sensor")
             let hint = settling
                 ? (armed
                     ? "Sliding back. Tilt up to pause - about 3 seconds from fully out to flush."
@@ -166,31 +194,18 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
                 self.sliding = settling
             }
         }
-        return (cols, rows, snapshot)
+        return (cols, rows, snapshot, pinScale)
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         noteViewer(frame)
-        let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
-        guard let depthMap else { return }
+        guard let raw = frame.capturedDepthData else { return }
+        let depthData = raw.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+        let depthMap = depthData.depthDataMap
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
-
-        var confidence: UnsafePointer<UInt8>?
-        var confidenceStride = 0
-        let confMap = frame.smoothedSceneDepth?.confidenceMap ?? frame.sceneDepth?.confidenceMap
-        if let confMap {
-            CVPixelBufferLockBaseAddress(confMap, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(confMap, .readOnly) }
-            if let confBase = CVPixelBufferGetBaseAddress(confMap) {
-                confidence = UnsafePointer(confBase.assumingMemoryBound(to: UInt8.self))
-                confidenceStride = CVPixelBufferGetBytesPerRow(confMap)
-                copyDepth(frame: frame, depthMap: depthMap, base: base, confidence: confidence, confidenceStride: confidenceStride)
-            }
-            return
-        }
-        copyDepth(frame: frame, depthMap: depthMap, base: base, confidence: nil, confidenceStride: 0)
+        copyDepth(frame: frame, depthMap: depthMap, base: base)
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -202,13 +217,6 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
                 hint: "Camera access is off. Turn it on in Settings for Pinwell.",
                 sliding: false
             )
-            return
-        }
-        if faceTracking, !droppedFace, let config {
-            droppedFace = true
-            faceTracking = false
-            config.userFaceTrackingEnabled = false
-            session.run(config, options: [.resetTracking, .removeExistingAnchors])
         }
     }
 
@@ -235,14 +243,15 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private func copyDepth(
         frame: ARFrame,
         depthMap: CVPixelBuffer,
-        base: UnsafeMutableRawPointer,
-        confidence: UnsafePointer<UInt8>?,
-        confidenceStride: Int
+        base: UnsafeMutableRawPointer
     ) {
         lock.lock()
         let cols = gridCols
         let rows = gridRows
         let size = viewport
+        let start = startM
+        let span = spanM
+        let draw = wantDepth
         lock.unlock()
 
         let display = frame.displayTransform(for: .portrait, viewportSize: size)
@@ -252,18 +261,60 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
             height: CVPixelBufferGetHeight(depthMap),
             floats: base.assumingMemoryBound(to: Float.self),
             bytesPerRow: CVPixelBufferGetBytesPerRow(depthMap),
-            confidence: confidence,
-            confidenceStride: confidenceStride
+            confidence: nil,
+            confidenceStride: 0
         )
         var next = [Float]()
         var near: Float = 0
-        sampleDepthPins(depth: sample, viewToImage: viewToImage, cols: cols, rows: rows, push: &next, nearest: &near)
+        sampleDepthPins(
+            depth: sample,
+            viewToImage: viewToImage,
+            cols: cols,
+            rows: rows,
+            start: start,
+            span: span,
+            push: &next,
+            nearest: &near
+        )
         lock.lock()
         if next.count == push.count {
             push = next
             nearest = near
         }
         lock.unlock()
+
+        let now = CACurrentMediaTime()
+        guard draw, now - lastDepthImage > 0.1 else { return }
+        lastDepthImage = now
+        let outW = 200
+        let outH = max(200, Int((Double(outW) * Double(size.height) / Double(max(size.width, 1))).rounded()))
+        let bytes = colorizeDepth(depth: sample, viewToImage: viewToImage, outWidth: outW, outHeight: outH, start: start)
+        guard let image = image(from: bytes, width: outW, height: outH) else { return }
+        if Thread.isMainThread {
+            depthImage = image
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.depthImage = image }
+        }
+    }
+
+    private func image(from bytes: [UInt8], width: Int, height: Int) -> UIImage? {
+        let data = Data(bytes)
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let cg = CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: info,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: true,
+            intent: .defaultIntent
+        ) else { return nil }
+        return UIImage(cgImage: cg)
     }
 
     private func startMotion() {
@@ -293,10 +344,10 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private var liveHint: String {
-        "LiDAR is live. Hold something within 25 cm of the back of the phone. Lay the screen flat, toward the sky, to slide the pins back."
+        "TrueDepth is live. Hold something within the start distance of the screen. Lay the screen flat, toward the sky, to slide the pins back."
     }
 
     private var missingHint: String {
-        "This iPhone has no LiDAR sensor. Pinwell needs an iPhone 12 Pro or any newer Pro."
+        "This iPhone has no TrueDepth camera. Pinwell needs a Face ID iPhone."
     }
 }

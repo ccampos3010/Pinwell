@@ -35,9 +35,11 @@ enum PinMath {
         min(48, max(16, n))
     }
 
-    static func pushAmount(_ z: Float) -> Float {
-        if !(z >= nearM) || z >= contactM { return 0 }
-        return (contactM - z) / (contactM - nearM)
+    static func pushAmount(_ z: Float, start: Float, span: Float) -> Float {
+        let near = max(nearM, start - max(span, 0.01))
+        if !z.isFinite || z < nearM || z >= start { return 0 }
+        if z <= near { return 1 }
+        return (start - z) / (start - near)
     }
 
     /// Degrees away from screen-up and level. 0 is flat, face to the sky.
@@ -52,9 +54,12 @@ enum PinMath {
         return tiltDeg <= engageDeg
     }
 
-    static func height(_ shown: Float) -> Float {
+    static let colorFarM: Float = 1.2
+
+    static func height(_ shown: Float, scale: Float) -> Float {
         let t = min(1, max(0, shown))
-        return minHeight + t * travel
+        let s = min(2, max(0.1, scale))
+        return minHeight + t * travel * s
     }
 }
 
@@ -72,6 +77,8 @@ func sampleDepthPins(
     viewToImage: CGAffineTransform,
     cols: Int,
     rows: Int,
+    start: Float,
+    span: Float,
     push: inout [Float],
     nearest: inout Float
 ) {
@@ -109,7 +116,7 @@ func sampleDepthPins(
                 }
             }
             if close > 0 && (best == 0 || close < best) { best = close }
-            push[row * cols + col] = PinMath.pushAmount(close)
+            push[row * cols + col] = PinMath.pushAmount(close, start: start, span: span)
         }
     }
     nearest = best
@@ -148,4 +155,49 @@ func retractPins(latched: inout [Float], smooth: inout [Float], shown: inout [Fl
         latched[i] = h
         smooth[i] = h
     }
+}
+
+func depthPixel(z: Float, start: Float) -> (UInt8, UInt8, UInt8) {
+    if !z.isFinite || z <= 0 { return (0, 0, 0) }
+    if z >= start {
+        let far = max(start + 0.2, PinMath.colorFarM)
+        let t = min(1, (z - start) / (far - start))
+        let w = UInt8((1 - t) * 255)
+        return (w, w, w)
+    }
+    let t = min(1, max(0, (start - z) / max(start - PinMath.nearM, 0.01)))
+    return (UInt8(255 * (1 - t)), UInt8(255 * (1 - t)), 255)
+}
+
+func colorizeDepth(
+    depth: DepthSample,
+    viewToImage: CGAffineTransform,
+    outWidth: Int,
+    outHeight: Int,
+    start: Float
+) -> [UInt8] {
+    var bytes = [UInt8](repeating: 0, count: outWidth * outHeight * 4)
+    for y in 0..<outHeight {
+        for x in 0..<outWidth {
+            let u = (CGFloat(x) + 0.5) / CGFloat(outWidth)
+            let v = (CGFloat(y) + 0.5) / CGFloat(outHeight)
+            let p = CGPoint(x: u, y: v).applying(viewToImage)
+            let px = Int((p.x * CGFloat(depth.width)).rounded())
+            let py = Int((p.y * CGFloat(depth.height)).rounded())
+            var z: Float = 0
+            if px >= 0, py >= 0, px < depth.width, py < depth.height {
+                let row = UnsafeRawPointer(depth.floats)
+                    .advanced(by: py * depth.bytesPerRow)
+                    .assumingMemoryBound(to: Float.self)
+                z = row[px]
+            }
+            let c = depthPixel(z: z, start: start)
+            let i = (y * outWidth + x) * 4
+            bytes[i] = c.0
+            bytes[i + 1] = c.1
+            bytes[i + 2] = c.2
+            bytes[i + 3] = 255
+        }
+    }
+    return bytes
 }

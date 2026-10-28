@@ -108,7 +108,7 @@ struct PinSceneView: UIViewRepresentable {
             let shaftR = pitch * 0.135
             let capR = pitch * 0.34
             for i in 0..<n {
-                let h = PinMath.height(frame.shown[i])
+                let h = PinMath.height(frame.shown[i], scale: frame.scale)
                 let x = ((Float(i % frame.cols) + 0.5) / Float(frame.cols)) * PinMath.boardW - PinMath.boardW / 2
                 let z = PinMath.boardH / 2 - ((Float(i / frame.cols) + 0.5) / Float(frame.rows)) * PinMath.boardH
                 shafts[i].simdPosition = SIMD3(x, h * 0.5, z)

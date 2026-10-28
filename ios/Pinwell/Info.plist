@@ -33,7 +33,7 @@
 	<key>UIUserInterfaceStyle</key>
 	<string>Dark</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Pinwell reads the rear LiDAR sensor for the pins, and uses the front camera only to match the view to where you are looking. It does not show either picture.</string>
+	<string>Pinwell uses the front TrueDepth camera for the pins and to match the view to where you are looking. It does not show the picture.</string>
 	<key>NSMotionUsageDescription</key>
 	<string>Pinwell slides the pins back when you lay the screen flat toward the sky.</string>
 </dict>
