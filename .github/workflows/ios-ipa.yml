@@ -1,0 +1,38 @@
+name: Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build unsigned device app
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild \
+            -project Pinwell.xcodeproj \
+            -scheme Pinwell \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products" -path '*iphoneos*' -name 'Pinwell.app' -type d | head -1)
+          test -n "$APP" && test -d "$APP"
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Pinwell-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pinwell-unsigned-ipa
+          path: ios/Pinwell-unsigned.ipa
+          retention-days: 14
