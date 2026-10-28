@@ -21,8 +21,21 @@ struct ContentView: View {
                 .opacity(showControls ? 1 : 0)
                 .allowsHitTesting(showControls)
         }
+        .overlay(alignment: .topTrailing) {
+            if model.pinsLocked {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.black.opacity(0.45), in: Circle())
+                    .padding(.top, 10)
+                    .padding(.trailing, 12)
+                    .allowsHitTesting(false)
+            }
+        }
         .animation(.easeInOut(duration: 0.35), value: showControls)
         .contentShape(Rectangle())
+        .onTapGesture(count: 2) { model.togglePinsLock() }
         .onTapGesture { reveal() }
         .background(Color(red: 0.05, green: 0.045, blue: 0.04))
         .preferredColorScheme(.dark)

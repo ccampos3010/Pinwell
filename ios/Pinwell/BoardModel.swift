@@ -47,6 +47,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var pinScale = 0.5
     @Published var reflection = 0.9
     @Published var blur = 0.18
+    @Published var pinsLocked = false
     @Published var depthImage: UIImage?
 
     private let lock = NSLock()
@@ -72,6 +73,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var lookValue = BoardLook.pins
     private var reflectionValue: Float = 0.9
     private var blurValue: Float = 0.18
+    private var pinsHeld = false
     private var reflectionShot: UIImage?
     private var lastReflectionCapture = 0.0
     private let sessionQueue = DispatchQueue(label: "pinwell.session", qos: .userInteractive)
@@ -146,6 +148,14 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         blur = Double(v)
     }
 
+    func togglePinsLock() {
+        lock.lock()
+        pinsHeld.toggle()
+        let held = pinsHeld
+        lock.unlock()
+        pinsLocked = held
+    }
+
     func setCols(_ next: Int) {
         let cols = PinMath.clampCols(next)
         let rows = PinMath.rows(for: cols)
@@ -208,11 +218,13 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     func step(dt: Double) -> PinFrame {
         let dtF = Float(min(0.05, max(0, dt)))
         lock.lock()
-        let settling = skyFlat
-        if settling {
-            retractPins(latched: &latched, smooth: &smooth, shown: &shown, dt: dtF)
-        } else {
-            stepPins(latched: &latched, smooth: &smooth, shown: &shown, push: push, dt: dtF)
+        let settling = skyFlat && !pinsHeld
+        if !pinsHeld {
+            if settling {
+                retractPins(latched: &latched, smooth: &smooth, shown: &shown, dt: dtF)
+            } else {
+                stepPins(latched: &latched, smooth: &smooth, shown: &shown, push: push, dt: dtF)
+            }
         }
         let frame = PinFrame(
             cols: gridCols,

@@ -6,7 +6,7 @@ enum PinMath {
     static let nearM: Float = 0.05
     static let travel: Float = 0.62
     static let minHeight: Float = 0.004
-    static let fullResetSec: Float = 3
+    static let fullResetSec: Float = 1.5
     static let engageDeg = 8.0
     static let releaseDeg = 10.0
     static let boardW: Float = 1.02
@@ -137,7 +137,7 @@ func stepPins(
     let cap = min(Float(0.05), dt)
     let kSmooth = 1 - exp(-12 * cap)
     let kRise = 1 - exp(-5.5 * cap)
-    let kFall = 1 - exp(-8 * cap)
+    let kFall = 1 - exp(-16 * cap)
     for i in 0..<latched.count {
         let p = i < push.count ? push[i] : 0
         let s0 = smooth[i]
