@@ -48,6 +48,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var reflection = 0.9
     @Published var blur = 0.18
     @Published var pinsLocked = false
+    @Published var followsDepth = false
     @Published var depthImage: UIImage?
 
     private let lock = NSLock()
@@ -74,6 +75,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var reflectionValue: Float = 0.9
     private var blurValue: Float = 0.18
     private var pinsHeld = false
+    private var followDepth = false
     private var reflectionShot: UIImage?
     private var lastReflectionCapture = 0.0
     private let sessionQueue = DispatchQueue(label: "pinwell.session", qos: .userInteractive)
@@ -146,6 +148,13 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         blurValue = v
         lock.unlock()
         blur = Double(v)
+    }
+
+    func setFollowsDepth(_ on: Bool) {
+        lock.lock()
+        followDepth = on
+        lock.unlock()
+        followsDepth = on
     }
 
     func togglePinsLock() {
@@ -223,7 +232,14 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
             if settling {
                 retractPins(latched: &latched, smooth: &smooth, shown: &shown, dt: dtF)
             } else {
-                stepPins(latched: &latched, smooth: &smooth, shown: &shown, push: push, dt: dtF)
+                stepPins(
+                    latched: &latched,
+                    smooth: &smooth,
+                    shown: &shown,
+                    push: push,
+                    dt: dtF,
+                    follow: followDepth
+                )
             }
         }
         let frame = PinFrame(

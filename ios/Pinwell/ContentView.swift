@@ -55,6 +55,15 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
+            Toggle(isOn: Binding(
+                get: { model.followsDepth },
+                set: { model.setFollowsDepth($0); reveal() }
+            )) {
+                Text("Follow depth")
+                    .font(.caption)
+            }
+            .tint(Color(white: 0.82))
+
             labeled("Density", value: "\(model.cols)") {
                 Slider(
                     value: Binding(

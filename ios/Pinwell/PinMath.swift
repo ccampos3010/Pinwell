@@ -132,23 +132,33 @@ func stepPins(
     smooth: inout [Float],
     shown: inout [Float],
     push: [Float],
-    dt: Float
+    dt: Float,
+    follow: Bool
 ) {
     let cap = min(Float(0.05), dt)
     let kSmooth = 1 - exp(-12 * cap)
     let kRise = 1 - exp(-5.5 * cap)
     let kFall = 1 - exp(-16 * cap)
+    let kBack = 1 - exp(-2.75 * cap)
     for i in 0..<latched.count {
         let p = i < push.count ? push[i] : 0
         let s0 = smooth[i]
         let s = s0 + (p - s0) * kSmooth
         smooth[i] = s
-        var lat = latched[i]
-        if s > lat { lat = s }
-        latched[i] = lat
-        let vis = shown[i]
-        let k: Float = lat >= vis ? kRise : kFall
-        shown[i] = vis + (lat - vis) * k
+        if follow {
+            let vis = shown[i]
+            let k: Float = s >= vis ? kRise : kBack
+            let next = vis + (s - vis) * k
+            shown[i] = next
+            latched[i] = next
+        } else {
+            var lat = latched[i]
+            if s > lat { lat = s }
+            latched[i] = lat
+            let vis = shown[i]
+            let k: Float = lat >= vis ? kRise : kFall
+            shown[i] = vis + (lat - vis) * k
+        }
     }
 }
 
