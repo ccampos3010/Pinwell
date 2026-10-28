@@ -155,7 +155,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
             let posture = settling ? "Sliding" : (near > 0 && near < PinMath.contactM ? "Pressing" : "Sensor")
             let hint = settling
                 ? (armed
-                    ? "Sliding back. Tilt up to pause \u2014 about 3 seconds from fully out to flush."
+                    ? "Sliding back. Tilt up to pause — about 3 seconds from fully out to flush."
                     : "Sliding back. About 3 seconds from fully out to flush.")
                 : liveHint
             DispatchQueue.main.async { [weak self] in
