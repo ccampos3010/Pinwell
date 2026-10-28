@@ -155,7 +155,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
             let posture = settling ? "Sliding" : (near > 0 && near < PinMath.contactM ? "Pressing" : "Sensor")
             let hint = settling
                 ? (armed
-                    ? "Sliding back. Tilt up to pause — about 3 seconds from fully out to flush."
+                    ? "Sliding back. Tilt up to pause - about 3 seconds from fully out to flush."
                     : "Sliding back. About 3 seconds from fully out to flush.")
                 : liveHint
             DispatchQueue.main.async { [weak self] in
@@ -184,7 +184,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
             CVPixelBufferLockBaseAddress(confMap, .readOnly)
             defer { CVPixelBufferUnlockBaseAddress(confMap, .readOnly) }
             if let confBase = CVPixelBufferGetBaseAddress(confMap) {
-                confidence = confBase.assumingMemoryBound(to: UInt8.self)
+                confidence = UnsafePointer(confBase.assumingMemoryBound(to: UInt8.self))
                 confidenceStride = CVPixelBufferGetBytesPerRow(confMap)
                 copyDepth(frame: frame, depthMap: depthMap, base: base, confidence: confidence, confidenceStride: confidenceStride)
             }
