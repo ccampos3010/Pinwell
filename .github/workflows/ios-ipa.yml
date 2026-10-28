@@ -12,6 +12,8 @@ jobs:
         working-directory: ios
         run: |
           set -euo pipefail
+          python3 -c "import base64,pathlib; p=pathlib.Path('Pinwell/Assets.xcassets/AppIcon.appiconset'); pathlib.Path('/tmp/AppIcon.jpg').write_bytes(base64.b64decode((p/'AppIcon.b64').read_text()))"
+          sips -s format png /tmp/AppIcon.jpg --out Pinwell/Assets.xcassets/AppIcon.appiconset/AppIcon.png
           xcodebuild -version
           xcodebuild \
             -project Pinwell.xcodeproj \

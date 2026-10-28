@@ -9,8 +9,8 @@ struct ContentView: View {
         ZStack(alignment: .bottom) {
             PinSceneView(model: model)
                 .ignoresSafeArea()
-                .opacity(model.showsDepth ? 0 : 1)
-            if model.showsDepth, let image = model.depthImage {
+                .opacity(model.look == .depth ? 0 : 1)
+            if model.look == .depth, let image = model.depthImage {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
@@ -33,11 +33,12 @@ struct ContentView: View {
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("View", selection: Binding(
-                get: { model.showsDepth },
-                set: { model.setShowsDepth($0); reveal() }
+                get: { model.look },
+                set: { model.setLook($0); reveal() }
             )) {
-                Text("Pins").tag(false)
-                Text("Depth").tag(true)
+                Text("Pins").tag(BoardLook.pins)
+                Text("Chrome").tag(BoardLook.chrome)
+                Text("Depth").tag(BoardLook.depth)
             }
             .pickerStyle(.segmented)
 
@@ -84,6 +85,30 @@ struct ContentView: View {
                     step: 0.1,
                     onEditingChanged: hold(_:)
                 )
+            }
+            if model.look == .chrome {
+                labeled("Reflect", value: "\(Int((model.reflection * 100).rounded()))%") {
+                    Slider(
+                        value: Binding(
+                            get: { model.reflection },
+                            set: { model.setReflection($0) }
+                        ),
+                        in: 0...1,
+                        step: 0.05,
+                        onEditingChanged: hold(_:)
+                    )
+                }
+                labeled("Blur", value: "\(Int((model.blur * 100).rounded()))%") {
+                    Slider(
+                        value: Binding(
+                            get: { model.blur },
+                            set: { model.setBlur($0) }
+                        ),
+                        in: 0...1,
+                        step: 0.05,
+                        onEditingChanged: hold(_:)
+                    )
+                }
             }
         }
         .tint(Color(white: 0.82))

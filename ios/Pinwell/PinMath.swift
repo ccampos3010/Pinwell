@@ -35,11 +35,16 @@ enum PinMath {
         min(48, max(16, n))
     }
 
+    /// Closest distance that still counts as a full rise. Cannot sit inside the sensor floor.
+    static func fullDistance(start: Float, span: Float) -> Float {
+        max(nearM, start - max(span, 0.01))
+    }
+
     static func pushAmount(_ z: Float, start: Float, span: Float) -> Float {
-        let near = max(nearM, start - max(span, 0.01))
-        if !z.isFinite || z < nearM || z >= start { return 0 }
-        if z <= near { return 1 }
-        return (start - z) / (start - near)
+        if !z.isFinite || z <= 0 || z >= start { return 0 }
+        let full = fullDistance(start: start, span: span)
+        if z <= full { return 1 }
+        return (start - z) / (start - full)
     }
 
     /// Degrees away from screen-up and level. 0 is flat, face to the sky.
@@ -85,7 +90,7 @@ func sampleDepthPins(
     let count = cols * rows
     if push.count != count { push = Array(repeating: 0, count: count) }
     var best: Float = 0
-    let window = max(1, depth.width / max(cols, 1) / 2)
+    let window = 0
     for row in 0..<rows {
         for col in 0..<cols {
             let u = (CGFloat(col) + 0.5) / CGFloat(cols)
@@ -109,7 +114,7 @@ func sampleDepthPins(
                         if x < 0 || x >= depth.width { continue }
                         if let rowC, rowC[x] == 0 { continue }
                         let z = rowF[x]
-                        if z.isFinite && z >= PinMath.nearM && z < 8 && (close == 0 || z < close) {
+                        if z.isFinite && z > 0 && z < 8 && (close == 0 || z < close) {
                             close = z
                         }
                     }
@@ -157,7 +162,7 @@ func retractPins(latched: inout [Float], smooth: inout [Float], shown: inout [Fl
     }
 }
 
-func depthPixel(z: Float, start: Float) -> (UInt8, UInt8, UInt8) {
+func depthPixel(z: Float, start: Float, span: Float) -> (UInt8, UInt8, UInt8) {
     if !z.isFinite || z <= 0 { return (0, 0, 0) }
     if z >= start {
         let far = max(start + 0.2, PinMath.colorFarM)
@@ -165,8 +170,11 @@ func depthPixel(z: Float, start: Float) -> (UInt8, UInt8, UInt8) {
         let w = UInt8((1 - t) * 255)
         return (w, w, w)
     }
-    let t = min(1, max(0, (start - z) / max(start - PinMath.nearM, 0.01)))
-    return (UInt8(255 * (1 - t)), UInt8(255 * (1 - t)), 255)
+    let full = PinMath.fullDistance(start: start, span: span)
+    if z <= full { return (0, 0, 255) }
+    let t = (start - z) / (start - full)
+    let w = UInt8(255 * (1 - t))
+    return (w, w, 255)
 }
 
 func colorizeDepth(
@@ -174,7 +182,8 @@ func colorizeDepth(
     viewToImage: CGAffineTransform,
     outWidth: Int,
     outHeight: Int,
-    start: Float
+    start: Float,
+    span: Float
 ) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: outWidth * outHeight * 4)
     for y in 0..<outHeight {
@@ -191,7 +200,7 @@ func colorizeDepth(
                     .assumingMemoryBound(to: Float.self)
                 z = row[px]
             }
-            let c = depthPixel(z: z, start: start)
+            let c = depthPixel(z: z, start: start, span: span)
             let i = (y * outWidth + x) * 4
             bytes[i] = c.0
             bytes[i + 1] = c.1

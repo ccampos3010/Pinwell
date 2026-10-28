@@ -1,9 +1,28 @@
 import ARKit
 import AVFoundation
+import CoreImage
 import CoreMotion
 import CoreVideo
 import QuartzCore
 import UIKit
+
+enum BoardLook: String, CaseIterable, Identifiable {
+    case pins
+    case chrome
+    case depth
+    var id: String { rawValue }
+}
+
+struct PinFrame {
+    var cols: Int
+    var rows: Int
+    var shown: [Float]
+    var scale: Float
+    var look: BoardLook
+    var reflection: Float
+    var blur: Float
+    var env: UIImage?
+}
 
 enum LidarState: Equatable {
     case checking
@@ -22,10 +41,12 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var hint = "Starting the front depth camera."
     @Published var lidar: LidarState = .checking
     @Published var sliding = false
-    @Published var showsDepth = false
+    @Published var look = BoardLook.pins
     @Published var startCM = 25
     @Published var spanCM = 10
     @Published var pinScale = 0.5
+    @Published var reflection = 0.9
+    @Published var blur = 0.18
     @Published var depthImage: UIImage?
 
     private let lock = NSLock()
@@ -39,7 +60,6 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var skyFlat = false
     private var skyArmed = false
     private var viewport = CGSize(width: 390, height: 844)
-    private var lastUI = 0.0
     private var lastDepthImage = 0.0
     private let motion = CMMotionManager()
     private var config: ARFaceTrackingConfiguration?
@@ -49,7 +69,13 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var startM: Float = 0.25
     private var spanM: Float = 0.10
     private var scale: Float = 0.5
-    private var wantDepth = false
+    private var lookValue = BoardLook.pins
+    private var reflectionValue: Float = 0.9
+    private var blurValue: Float = 0.18
+    private var reflectionShot: UIImage?
+    private var lastReflectionCapture = 0.0
+    private let sessionQueue = DispatchQueue(label: "pinwell.session", qos: .userInteractive)
+    private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
 
     override init() {
         let n = 32 * PinMath.rows(for: 32)
@@ -58,6 +84,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         shown = Array(repeating: 0, count: n)
         push = Array(repeating: 0, count: n)
         super.init()
+        session.delegateQueue = sessionQueue
         session.delegate = self
     }
 
@@ -93,10 +120,30 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func setShowsDepth(_ on: Bool) {
+        setLook(on ? .depth : .pins)
+    }
+
+    func setLook(_ next: BoardLook) {
         lock.lock()
-        wantDepth = on
+        lookValue = next
         lock.unlock()
-        showsDepth = on
+        look = next
+    }
+
+    func setReflection(_ value: Double) {
+        let v = Float(min(1, max(0, value)))
+        lock.lock()
+        reflectionValue = v
+        lock.unlock()
+        reflection = Double(v)
+    }
+
+    func setBlur(_ value: Double) {
+        let v = Float(min(1, max(0, value)))
+        lock.lock()
+        blurValue = v
+        lock.unlock()
+        blur = Double(v)
     }
 
     func setCols(_ next: Int) {
@@ -158,7 +205,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         lock.unlock()
         return PinMath.eye(distanceM: d, rightM: r, upM: u)
     }
-    func step(dt: Double) -> (cols: Int, rows: Int, shown: [Float], scale: Float) {
+    func step(dt: Double) -> PinFrame {
         let dtF = Float(min(0.05, max(0, dt)))
         lock.lock()
         let settling = skyFlat
@@ -167,45 +214,35 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         } else {
             stepPins(latched: &latched, smooth: &smooth, shown: &shown, push: push, dt: dtF)
         }
-        let snapshot = shown
-        let cols = gridCols
-        let rows = gridRows
-        let near = nearest
-        let armed = skyArmed
-        let pinScale = self.scale
-        let start = startM
+        let frame = PinFrame(
+            cols: gridCols,
+            rows: gridRows,
+            shown: shown,
+            scale: scale,
+            look: lookValue,
+            reflection: reflectionValue,
+            blur: blurValue,
+            env: reflectionShot
+        )
         lock.unlock()
-
-        let now = CACurrentMediaTime()
-        if now - lastUI > 0.14 {
-            lastUI = now
-            let cm: Int? = near > 0 ? Int((near * 100).rounded()) : nil
-            let posture = settling ? "Sliding" : (near > 0 && near < start ? "Pressing" : "Sensor")
-            let hint = settling
-                ? (armed
-                    ? "Sliding back. Tilt up to pause - about 3 seconds from fully out to flush."
-                    : "Sliding back. About 3 seconds from fully out to flush.")
-                : liveHint
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.lidar == .live else { return }
-                self.nearestCM = cm
-                self.posture = posture
-                self.hint = hint
-                self.sliding = settling
-            }
-        }
-        return (cols, rows, snapshot, pinScale)
+        return frame
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         noteViewer(frame)
+        lock.lock()
+        let look = lookValue
+        lock.unlock()
+        if look == .chrome { captureReflection(frame) }
         guard let raw = frame.capturedDepthData else { return }
-        let depthData = raw.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+        let depthData = raw.depthDataType == kCVPixelFormatType_DepthFloat32
+            ? raw
+            : raw.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
         let depthMap = depthData.depthDataMap
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
-        copyDepth(frame: frame, depthMap: depthMap, base: base)
+        copyDepth(frame: frame, depthMap: depthMap, base: base, drawDepth: look == .depth)
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -243,7 +280,8 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private func copyDepth(
         frame: ARFrame,
         depthMap: CVPixelBuffer,
-        base: UnsafeMutableRawPointer
+        base: UnsafeMutableRawPointer,
+        drawDepth: Bool
     ) {
         lock.lock()
         let cols = gridCols
@@ -251,7 +289,6 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         let size = viewport
         let start = startM
         let span = spanM
-        let draw = wantDepth
         lock.unlock()
 
         let display = frame.displayTransform(for: .portrait, viewportSize: size)
@@ -284,11 +321,11 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         lock.unlock()
 
         let now = CACurrentMediaTime()
-        guard draw, now - lastDepthImage > 0.1 else { return }
+        guard drawDepth, now - lastDepthImage > 0.12 else { return }
         lastDepthImage = now
         let outW = 200
         let outH = max(200, Int((Double(outW) * Double(size.height) / Double(max(size.width, 1))).rounded()))
-        let bytes = colorizeDepth(depth: sample, viewToImage: viewToImage, outWidth: outW, outHeight: outH, start: start)
+        let bytes = colorizeDepth(depth: sample, viewToImage: viewToImage, outWidth: outW, outHeight: outH, start: start, span: span)
         guard let image = image(from: bytes, width: outW, height: outH) else { return }
         if Thread.isMainThread {
             depthImage = image
@@ -315,6 +352,23 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
             intent: .defaultIntent
         ) else { return nil }
         return UIImage(cgImage: cg)
+    }
+
+    private func captureReflection(_ frame: ARFrame) {
+        let now = CACurrentMediaTime()
+        if now - lastReflectionCapture < 1.0 / 12 { return }
+        lastReflectionCapture = now
+        var image = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.rightMirrored)
+        let extent = image.extent
+        guard extent.width > 1, extent.height > 1 else { return }
+        let scale = 192 / max(extent.width, extent.height)
+        image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let bounds = image.extent.integral
+        guard bounds.width > 1, bounds.height > 1, let cg = ciContext.createCGImage(image, from: bounds) else { return }
+        let shot = UIImage(cgImage: cg)
+        lock.lock()
+        reflectionShot = shot
+        lock.unlock()
     }
 
     private func startMotion() {
