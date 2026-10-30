@@ -44,6 +44,7 @@ struct PinSceneView: UIViewRepresentable {
         private var appliedLook = BoardLook.chrome
         private var lastReflection: Float = -1
         private var lastBlur: Float = -1
+        private var lastScale: Float = -1
         private var lastEnv: UIImage?
         var owner: BoardModel?
         private let shaftGeo: SCNCylinder
@@ -61,9 +62,11 @@ struct PinSceneView: UIViewRepresentable {
             metal(shaftMat, rough: 0.38, shade: 0.62)
             metal(capMat, rough: 0.16, shade: 0.86)
             chromeMat.lightingModel = .physicallyBased
-            chromeMat.diffuse.contents = UIColor(white: 0.04, alpha: 1)
-            chromeMat.metalness.contents = 0.9
-            chromeMat.roughness.contents = 0.18
+            chromeMat.diffuse.contents = UIColor(white: 0.02, alpha: 1)
+            chromeMat.metalness.contents = 1.0
+            chromeMat.roughness.contents = 0.12
+            chromeMat.reflective.contents = UIColor(white: 0.7, alpha: 1)
+            chromeMat.reflective.intensity = 1.4
             shaftGeo.materials = [shaftMat]
             capGeo.materials = [chromeMat]
             buildStudio()
@@ -126,13 +129,20 @@ struct PinSceneView: UIViewRepresentable {
             if abs(frame.reflection - lastReflection) > 0.005 || abs(frame.blur - lastBlur) > 0.005 {
                 lastReflection = frame.reflection
                 lastBlur = frame.blur
-                chromeMat.metalness.contents = frame.reflection
-                chromeMat.roughness.contents = max(0.02, frame.blur)
-                scene.lightingEnvironment.intensity = CGFloat(frame.reflection) * 1.8
+                chromeMat.metalness.contents = 1.0
+                chromeMat.roughness.contents = max(0.05, frame.blur * 0.45)
+                chromeMat.reflective.intensity = CGFloat(0.35 + frame.reflection * 1.3)
+                scene.lightingEnvironment.intensity = CGFloat(0.6 + frame.reflection)
             }
             if let env = frame.env, env !== lastEnv {
+                chromeMat.reflective.contents = env
                 scene.lightingEnvironment.contents = env
                 lastEnv = env
+                lastShown.removeAll(keepingCapacity: true)
+            }
+            if abs(frame.scale - lastScale) > 0.001 {
+                lastScale = frame.scale
+                lastShown.removeAll(keepingCapacity: true)
             }
             if lastShown.count != n { lastShown = Array(repeating: -1, count: n) }
             let pitch = min(PinMath.boardW / Float(frame.cols), PinMath.boardH / Float(frame.rows))

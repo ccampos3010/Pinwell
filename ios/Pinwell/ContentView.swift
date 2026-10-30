@@ -10,16 +10,21 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            PinSceneView(model: model)
-                .ignoresSafeArea()
-                .opacity(model.look == .depth ? 0 : 1)
-            if model.look == .depth, let image = model.depthImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
+            ZStack {
+                PinSceneView(model: model)
                     .ignoresSafeArea()
-                    .allowsHitTesting(false)
+                    .opacity(model.look == .depth ? 0 : 1)
+                if model.look == .depth, let image = model.depthImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
             }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { model.togglePinsLock() }
+            .onTapGesture { reveal() }
             controls
                 .opacity(showControls ? 1 : 0)
                 .allowsHitTesting(showControls)
@@ -37,9 +42,6 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.35), value: showControls)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) { model.togglePinsLock() }
-        .onTapGesture { reveal() }
         .background(Color(red: 0.05, green: 0.045, blue: 0.04))
         .preferredColorScheme(.dark)
         .onAppear { model.start() }
@@ -118,22 +120,25 @@ struct ContentView: View {
                         get: { Double(model.startCM) },
                         set: { model.setStartCM(Int($0.rounded())) }
                     ),
-                    in: 10...100,
+                    in: 5...150,
                     step: 1,
                     onEditingChanged: hold(_:)
                 )
             }
-            labeled("Depth", value: "\(model.spanCM) cm") {
+            labeled("End", value: "\(model.endCM) cm") {
                 Slider(
                     value: Binding(
-                        get: { Double(model.spanCM) },
-                        set: { model.setSpanCM(Int($0.rounded())) }
+                        get: { Double(model.endCM) },
+                        set: { model.setEndCM(Int($0.rounded())) }
                     ),
-                    in: 2...40,
+                    in: 2...150,
                     step: 1,
                     onEditingChanged: hold(_:)
                 )
             }
+            Text("Balls rise between Start and End. Scale is how far they travel in that range. In the depth view, blue is farther than both, gray is between them, and red is closer.")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.55))
             labeled("Scale", value: String(format: "%.1f", model.pinScale)) {
                 Slider(
                     value: Binding(
