@@ -4,6 +4,8 @@ struct ContentView: View {
     @StateObject private var model = BoardModel()
     @State private var showControls = false
     @State private var hideTask: Task<Void, Never>?
+    @State private var shareFile: ShareFile?
+    @State private var captureNote = ""
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -41,6 +43,9 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear { model.start() }
         .onDisappear { model.stop() }
+        .sheet(item: $shareFile) { file in
+            ActivityView(items: [file.url])
+        }
     }
 
     private var controls: some View {
@@ -54,6 +59,24 @@ struct ContentView: View {
                 Text("Depth").tag(BoardLook.depth)
             }
             .pickerStyle(.segmented)
+
+            Button {
+                reveal()
+                model.exportCapture { url in
+                    if let url {
+                        captureNote = ""
+                        shareFile = ShareFile(url: url)
+                    } else {
+                        captureNote = "No frame yet. Point the screen at something and try again."
+                    }
+                }
+            } label: {
+                Text(captureNote.isEmpty ? "Save capture" : captureNote)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white.opacity(0.9))
 
             Toggle(isOn: Binding(
                 get: { model.followsDepth },
@@ -175,4 +198,19 @@ struct ContentView: View {
             showControls = false
         }
     }
+}
+
+private struct ShareFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct ActivityView: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

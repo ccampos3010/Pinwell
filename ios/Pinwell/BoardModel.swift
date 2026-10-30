@@ -78,6 +78,13 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var followDepth = false
     private var reflectionShot: UIImage?
     private var lastReflectionCapture = 0.0
+    private var lastCaptureStore = 0.0
+    private var captureJPEG: Data?
+    private var captureDepth = Data()
+    private var captureCW = 0
+    private var captureCH = 0
+    private var captureDW = 0
+    private var captureDH = 0
     private let sessionQueue = DispatchQueue(label: "pinwell.session", qos: .userInteractive)
     private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
 
@@ -163,6 +170,40 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         let held = pinsHeld
         lock.unlock()
         pinsLocked = held
+    }
+
+    /// Writes one zip the computer-side preview can read: color.jpg, depth.f32, meta.json.
+    func exportCapture(done: @escaping (URL?) -> Void) {
+        lock.lock()
+        let color = captureJPEG
+        let depth = captureDepth
+        let cw = captureCW
+        let ch = captureCH
+        let dw = captureDW
+        let dh = captureDH
+        let meta = """
+        {"version":1,"colorWidth":\(cw),"colorHeight":\(ch),"depthWidth":\(dw),"depthHeight":\(dh),"depth":"float32-le-meters-row-major","startM":\(startM),"spanM":\(spanM),"scale":\(scale),"cols":\(gridCols),"reflection":\(reflectionValue),"blur":\(blurValue),"followsDepth":\(followDepth),"look":"\(lookValue.rawValue)"}
+        """
+        lock.unlock()
+        guard let color, cw > 0, dw > 0, depth.count == dw * dh * 4 else {
+            DispatchQueue.main.async { done(nil) }
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let zip = Self.zipStore([
+                ("color.jpg", color),
+                ("depth.f32", depth),
+                ("meta.json", Data(meta.utf8)),
+            ])
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("PinwellCapture-\(Int(Date().timeIntervalSince1970)).zip")
+            do {
+                try zip.write(to: url, options: .atomic)
+                DispatchQueue.main.async { done(url) }
+            } catch {
+                DispatchQueue.main.async { done(nil) }
+            }
+        }
     }
 
     func setCols(_ next: Int) {
@@ -348,6 +389,8 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         }
         lock.unlock()
 
+        storeCapture(frame: frame, sample: sample, viewToImage: viewToImage, viewport: size)
+
         let now = CACurrentMediaTime()
         guard drawDepth, now - lastDepthImage > 0.12 else { return }
         lastDepthImage = now
@@ -382,6 +425,54 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         return UIImage(cgImage: cg)
     }
 
+    private func storeCapture(
+        frame: ARFrame,
+        sample: DepthSample,
+        viewToImage: CGAffineTransform,
+        viewport: CGSize
+    ) {
+        let now = CACurrentMediaTime()
+        if now - lastCaptureStore < 0.4 { return }
+        lastCaptureStore = now
+
+        var picture = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.rightMirrored)
+        let extent = picture.extent
+        guard extent.width > 1, extent.height > 1 else { return }
+        let scale = 960 / max(extent.width, extent.height)
+        picture = picture.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let bounds = picture.extent.integral
+        guard bounds.width > 1, bounds.height > 1,
+              let cg = ciContext.createCGImage(picture, from: bounds),
+              let jpeg = UIImage(cgImage: cg).jpegData(compressionQuality: 0.82) else { return }
+
+        let dw = 240
+        let dh = max(240, Int((Double(dw) * Double(viewport.height) / Double(max(viewport.width, 1))).rounded()))
+        var floats = [Float](repeating: 0, count: dw * dh)
+        for y in 0..<dh {
+            for x in 0..<dw {
+                let u = (CGFloat(x) + 0.5) / CGFloat(dw)
+                let v = (CGFloat(y) + 0.5) / CGFloat(dh)
+                let p = CGPoint(x: u, y: v).applying(viewToImage)
+                let px = Int((p.x * CGFloat(sample.width)).rounded())
+                let py = Int((p.y * CGFloat(sample.height)).rounded())
+                guard px >= 0, py >= 0, px < sample.width, py < sample.height else { continue }
+                let row = UnsafeRawPointer(sample.floats)
+                    .advanced(by: py * sample.bytesPerRow)
+                    .assumingMemoryBound(to: Float.self)
+                let z = row[px]
+                floats[y * dw + x] = z.isFinite && z > 0 ? z : 0
+            }
+        }
+        lock.lock()
+        captureJPEG = jpeg
+        captureDepth = floats.withUnsafeBytes { Data($0) }
+        captureCW = cg.width
+        captureCH = cg.height
+        captureDW = dw
+        captureDH = dh
+        lock.unlock()
+    }
+
     private func captureReflection(_ frame: ARFrame) {
         let now = CACurrentMediaTime()
         if now - lastReflectionCapture < 1.0 / 12 { return }
@@ -397,6 +488,88 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         lock.lock()
         reflectionShot = shot
         lock.unlock()
+    }
+
+    private static func zipStore(_ files: [(String, Data)]) -> Data {
+        var out = Data()
+        var central = Data()
+        var offset: UInt32 = 0
+        for (name, data) in files {
+            let nameData = Data(name.utf8)
+            let crc = Self.crc32(data)
+            let size = UInt32(data.count)
+            var local = Data()
+            local.append(le32(0x04034b50))
+            local.append(le16(20))
+            local.append(le16(0))
+            local.append(le16(0))
+            local.append(le16(0))
+            local.append(le16(0))
+            local.append(le32(crc))
+            local.append(le32(size))
+            local.append(le32(size))
+            local.append(le16(UInt16(nameData.count)))
+            local.append(le16(0))
+            local.append(nameData)
+            local.append(data)
+            var entry = Data()
+            entry.append(le32(0x02014b50))
+            entry.append(le16(20))
+            entry.append(le16(20))
+            entry.append(le16(0))
+            entry.append(le16(0))
+            entry.append(le16(0))
+            entry.append(le16(0))
+            entry.append(le32(crc))
+            entry.append(le32(size))
+            entry.append(le32(size))
+            entry.append(le16(UInt16(nameData.count)))
+            entry.append(le16(0))
+            entry.append(le16(0))
+            entry.append(le16(0))
+            entry.append(le16(0))
+            entry.append(le32(0))
+            entry.append(le32(offset))
+            entry.append(nameData)
+            out.append(local)
+            central.append(entry)
+            offset += UInt32(local.count)
+        }
+        let centralStart = UInt32(out.count)
+        out.append(central)
+        var end = Data()
+        end.append(le32(0x06054b50))
+        end.append(le16(0))
+        end.append(le16(0))
+        end.append(le16(UInt16(files.count)))
+        end.append(le16(UInt16(files.count)))
+        end.append(le32(UInt32(central.count)))
+        end.append(le32(centralStart))
+        end.append(le16(0))
+        out.append(end)
+        return out
+    }
+
+    private static func le16(_ value: UInt16) -> Data {
+        var v = value.littleEndian
+        return Data(bytes: &v, count: 2)
+    }
+
+    private static func le32(_ value: UInt32) -> Data {
+        var v = value.littleEndian
+        return Data(bytes: &v, count: 4)
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                let mask: UInt32 = (crc & 1) == 1 ? 0xEDB8_8320 : 0
+                crc = (crc >> 1) ^ mask
+            }
+        }
+        return ~crc
     }
 
     private func startMotion() {
