@@ -1,3 +1,4 @@
+import MessageUI
 import SwiftUI
 
 struct ContentView: View {
@@ -46,6 +47,20 @@ struct ContentView: View {
         .sheet(item: $shareFile) { file in
             ActivityView(items: [file.url])
         }
+        .sheet(item: $model.traceMail) { mail in
+            TraceMailView(mail: mail) { model.traceMail = nil }
+        }
+        .overlay(alignment: .top) {
+            if let traceStatus = model.traceStatus {
+                Text(traceStatus)
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .padding(.top, 12)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     private var controls: some View {
@@ -54,7 +69,6 @@ struct ContentView: View {
                 get: { model.look },
                 set: { model.setLook($0); reveal() }
             )) {
-                Text("Pins").tag(BoardLook.pins)
                 Text("Chrome").tag(BoardLook.chrome)
                 Text("Depth").tag(BoardLook.depth)
             }
@@ -155,6 +169,9 @@ struct ContentView: View {
                     )
                 }
             }
+            Text("Shake the phone to email a trace with the front camera and depth.")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.55))
         }
         .tint(Color(white: 0.82))
         .padding(16)
@@ -196,6 +213,56 @@ struct ContentView: View {
             try? await Task.sleep(nanoseconds: 2_200_000_000)
             guard !Task.isCancelled else { return }
             showControls = false
+        }
+    }
+}
+
+private struct TraceMailView: View {
+    let mail: TraceMail
+    let onDone: () -> Void
+
+    var body: some View {
+        Group {
+            if MFMailComposeViewController.canSendMail() {
+                MailComposer(mail: mail, onDone: onDone)
+            } else {
+                ActivityView(items: [mail.report, mail.file])
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
+
+private struct MailComposer: UIViewControllerRepresentable {
+    let mail: TraceMail
+    let onDone: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onDone: onDone) }
+
+    func makeUIViewController(context: Context) -> MFMailComposeViewController {
+        let controller = MFMailComposeViewController()
+        controller.setToRecipients(["ccamposrdj@gmail.com"])
+        controller.setSubject("Pinwell telemetry")
+        controller.setMessageBody(mail.report, isHTML: false)
+        if let data = try? Data(contentsOf: mail.file) {
+            controller.addAttachmentData(data, mimeType: "application/zip", fileName: mail.file.lastPathComponent)
+        }
+        controller.mailComposeDelegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: MFMailComposeViewController, context: Context) {}
+
+    final class Coordinator: NSObject, MFMailComposeViewControllerDelegate {
+        let onDone: () -> Void
+        init(onDone: @escaping () -> Void) { self.onDone = onDone }
+        func mailComposeController(
+            _ controller: MFMailComposeViewController,
+            didFinishWith result: MFMailComposeResult,
+            error: Error?
+        ) {
+            controller.dismiss(animated: true)
+            onDone()
         }
     }
 }

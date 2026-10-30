@@ -3,11 +3,11 @@ import AVFoundation
 import CoreImage
 import CoreMotion
 import CoreVideo
+import Darwin
 import QuartzCore
 import UIKit
 
 enum BoardLook: String, CaseIterable, Identifiable {
-    case pins
     case chrome
     case depth
     var id: String { rawValue }
@@ -22,6 +22,12 @@ struct PinFrame {
     var reflection: Float
     var blur: Float
     var env: UIImage?
+}
+
+struct TraceMail: Identifiable {
+    let id = UUID()
+    let report: String
+    let file: URL
 }
 
 enum LidarState: Equatable {
@@ -41,7 +47,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var hint = "Starting the front depth camera."
     @Published var lidar: LidarState = .checking
     @Published var sliding = false
-    @Published var look = BoardLook.pins
+    @Published var look = BoardLook.chrome
     @Published var startCM = 25
     @Published var spanCM = 10
     @Published var pinScale = 0.5
@@ -50,6 +56,8 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var pinsLocked = false
     @Published var followsDepth = false
     @Published var depthImage: UIImage?
+    @Published var traceMail: TraceMail?
+    @Published var traceStatus: String?
 
     private let lock = NSLock()
     private var gridCols = 32
@@ -71,11 +79,22 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private var startM: Float = 0.25
     private var spanM: Float = 0.10
     private var scale: Float = 0.5
-    private var lookValue = BoardLook.pins
+    private var lookValue = BoardLook.chrome
     private var reflectionValue: Float = 0.9
     private var blurValue: Float = 0.18
     private var pinsHeld = false
     private var followDepth = false
+    private let fusion = DepthFusion()
+    private var frameDts: [Double] = []
+    private var stepTimes: [Double] = []
+    private var sceneTimes: [Double] = []
+    private var depthTimes: [Double] = []
+    private var touchCounts: [Int] = []
+    private var shakeTimes: [Double] = []
+    private var lastShake = 0.0
+    private var captureRaw = Data()
+    private var captureRawW = 0
+    private var captureRawH = 0
     private var reflectionShot: UIImage?
     private var lastReflectionCapture = 0.0
     private var lastCaptureStore = 0.0
@@ -131,7 +150,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func setShowsDepth(_ on: Bool) {
-        setLook(on ? .depth : .pins)
+        setLook(on ? .depth : .chrome)
     }
 
     func setLook(_ next: BoardLook) {
@@ -182,19 +201,28 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         let dw = captureDW
         let dh = captureDH
         let meta = """
-        {"version":1,"colorWidth":\(cw),"colorHeight":\(ch),"depthWidth":\(dw),"depthHeight":\(dh),"depth":"float32-le-meters-row-major","startM":\(startM),"spanM":\(spanM),"scale":\(scale),"cols":\(gridCols),"reflection":\(reflectionValue),"blur":\(blurValue),"followsDepth":\(followDepth),"look":"\(lookValue.rawValue)"}
+        {"version":2,"colorWidth":\(cw),"colorHeight":\(ch),"depthWidth":\(dw),"depthHeight":\(dh),"rawWidth":\(captureRawW),"rawHeight":\(captureRawH),"depth":"float32-le-meters-row-major-portrait-view","depthRaw":"float32-le-meters-row-major-sensor","startM":\(startM),"spanM":\(spanM),"scale":\(scale),"cols":\(gridCols),"reflection":\(reflectionValue),"blur":\(blurValue),"followsDepth":\(followDepth),"look":"\(lookValue.rawValue)"}
         """
+        let raw = captureRaw
+        let rawW = captureRawW
+        let rawH = captureRawH
+        let report = traceReportLocked()
         lock.unlock()
         guard let color, cw > 0, dw > 0, depth.count == dw * dh * 4 else {
             DispatchQueue.main.async { done(nil) }
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
-            let zip = Self.zipStore([
+            var files: [(String, Data)] = [
                 ("color.jpg", color),
                 ("depth.f32", depth),
                 ("meta.json", Data(meta.utf8)),
-            ])
+                ("telemetry.txt", Data(report.utf8)),
+            ]
+            if rawW > 0 && raw.count == rawW * rawH * 4 {
+                files.append(("depth-raw.f32", raw))
+            }
+            let zip = Self.zipStore(files)
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("PinwellCapture-\(Int(Date().timeIntervalSince1970)).zip")
             do {
@@ -311,7 +339,40 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
-        copyDepth(frame: frame, depthMap: depthMap, base: base, drawDepth: look == .depth)
+        let started = CACurrentMediaTime()
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        let fused = fusion.fuse(
+            raw: base.assumingMemoryBound(to: Float.self),
+            bytesPerRow: CVPixelBufferGetBytesPerRow(depthMap),
+            width: width,
+            height: height,
+            imageWidth: CVPixelBufferGetWidth(frame.capturedImage),
+            imageHeight: CVPixelBufferGetHeight(frame.capturedImage),
+            intrinsics: frame.camera.intrinsics,
+            pose: frame.camera.transform
+        )
+        fused.withUnsafeBufferPointer { ptr in
+            guard let fusedBase = ptr.baseAddress else { return }
+            let sample = DepthSample(
+                width: width,
+                height: height,
+                floats: fusedBase,
+                bytesPerRow: width * MemoryLayout<Float>.size,
+                confidence: nil,
+                confidenceStride: 0
+            )
+            let rawSample = DepthSample(
+                width: width,
+                height: height,
+                floats: base.assumingMemoryBound(to: Float.self),
+                bytesPerRow: CVPixelBufferGetBytesPerRow(depthMap),
+                confidence: nil,
+                confidenceStride: 0
+            )
+            copyDepth(frame: frame, sample: sample, raw: rawSample, drawDepth: look == .depth)
+        }
+        noteDepth((CACurrentMediaTime() - started) * 1000)
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -348,8 +409,8 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
 
     private func copyDepth(
         frame: ARFrame,
-        depthMap: CVPixelBuffer,
-        base: UnsafeMutableRawPointer,
+        sample: DepthSample,
+        raw: DepthSample,
         drawDepth: Bool
     ) {
         lock.lock()
@@ -362,14 +423,6 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
 
         let display = frame.displayTransform(for: .portrait, viewportSize: size)
         let viewToImage = display.inverted()
-        let sample = DepthSample(
-            width: CVPixelBufferGetWidth(depthMap),
-            height: CVPixelBufferGetHeight(depthMap),
-            floats: base.assumingMemoryBound(to: Float.self),
-            bytesPerRow: CVPixelBufferGetBytesPerRow(depthMap),
-            confidence: nil,
-            confidenceStride: 0
-        )
         var next = [Float]()
         var near: Float = 0
         sampleDepthPins(
@@ -389,7 +442,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         }
         lock.unlock()
 
-        storeCapture(frame: frame, sample: sample, viewToImage: viewToImage, viewport: size)
+        storeCapture(frame: frame, sample: sample, raw: raw, viewToImage: viewToImage, viewport: size)
 
         let now = CACurrentMediaTime()
         guard drawDepth, now - lastDepthImage > 0.12 else { return }
@@ -428,6 +481,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     private func storeCapture(
         frame: ARFrame,
         sample: DepthSample,
+        raw: DepthSample,
         viewToImage: CGAffineTransform,
         viewport: CGSize
     ) {
@@ -463,6 +517,18 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
                 floats[y * dw + x] = z.isFinite && z > 0 ? z : 0
             }
         }
+        var rawFloats = [Float](repeating: 0, count: raw.width * raw.height)
+        if raw.width > 0 && raw.height > 0 {
+            for y in 0..<raw.height {
+                let row = UnsafeRawPointer(raw.floats)
+                    .advanced(by: y * raw.bytesPerRow)
+                    .assumingMemoryBound(to: Float.self)
+                for x in 0..<raw.width {
+                    let z = row[x]
+                    rawFloats[y * raw.width + x] = z.isFinite && z > 0 ? z : 0
+                }
+            }
+        }
         lock.lock()
         captureJPEG = jpeg
         captureDepth = floats.withUnsafeBytes { Data($0) }
@@ -470,6 +536,9 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         captureCH = cg.height
         captureDW = dw
         captureDH = dh
+        captureRaw = rawFloats.withUnsafeBytes { Data($0) }
+        captureRawW = raw.width
+        captureRawH = raw.height
         lock.unlock()
     }
 
@@ -572,6 +641,82 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         return ~crc
     }
 
+    func noteFrame(dt: Double, stepMs: Double, sceneMs: Double, updated: Int) {
+        lock.lock()
+        if frameDts.count >= 180 { frameDts.removeFirst() }
+        frameDts.append(dt)
+        if stepTimes.count >= 180 { stepTimes.removeFirst() }
+        stepTimes.append(stepMs)
+        if sceneTimes.count >= 180 { sceneTimes.removeFirst() }
+        sceneTimes.append(sceneMs)
+        if touchCounts.count >= 180 { touchCounts.removeFirst() }
+        touchCounts.append(updated)
+        lock.unlock()
+    }
+
+    func sendTrace() {
+        exportCapture { [weak self] url in
+            guard let self else { return }
+            guard let url else {
+                self.traceStatus = "No frame yet. Hold still a moment, then shake again."
+                return
+            }
+            self.traceMail = TraceMail(report: self.latestReport(), file: url)
+            self.traceStatus = "Opening the trace email."
+        }
+    }
+
+    private func latestReport() -> String {
+        lock.lock()
+        let report = traceReportLocked()
+        lock.unlock()
+        return report
+    }
+
+    private func noteDepth(_ ms: Double) {
+        lock.lock()
+        if depthTimes.count >= 180 { depthTimes.removeFirst() }
+        depthTimes.append(ms)
+        lock.unlock()
+    }
+
+    private func traceReportLocked() -> String {
+        let fusionStat = fusion.snapshot()
+        let fps = frameDts.filter { $0 > 0.0001 }.map { 1 / $0 }
+        let agree = fusionStat.tested > 0 ? Double(fusionStat.agreed) / Double(fusionStat.tested) : 0
+        return """
+        Pinwell telemetry
+        device \(Self.machineName()) \(UIDevice.current.systemVersion)
+        look \(lookValue.rawValue) follow \(followDepth) locked \(pinsHeld)
+        cols \(gridCols) start \(startM) span \(spanM) scale \(scale)
+        reflect \(reflectionValue) blur \(blurValue)
+        frames \(frameDts.count)
+        fps p50 \(pct(fps, 0.5)) p10 \(pct(fps, 0.1))
+        frame ms p50 \(pct(frameDts.map { $0 * 1000 }, 0.5)) p90 \(pct(frameDts.map { $0 * 1000 }, 0.9))
+        step ms p50 \(pct(stepTimes, 0.5)) p90 \(pct(stepTimes, 0.9))
+        scene ms p50 \(pct(sceneTimes, 0.5)) p90 \(pct(sceneTimes, 0.9))
+        depth ms p50 \(pct(depthTimes, 0.5)) p90 \(pct(depthTimes, 0.9))
+        nodes updated p50 \(pct(touchCounts.map(Double.init), 0.5))
+        fusion agree \(String(format: "%.3f", agree)) resets \(fusionStat.resets) tested \(fusionStat.tested)
+        color \(captureCW)x\(captureCH) depthView \(captureDW)x\(captureDH) depthRaw \(captureRawW)x\(captureRawH)
+        """
+    }
+
+    private func pct(_ values: [Double], _ p: Double) -> String {
+        guard !values.isEmpty else { return "-" }
+        let sorted = values.sorted()
+        let index = min(sorted.count - 1, max(0, Int((Double(sorted.count - 1) * p).rounded())))
+        return String(format: "%.2f", sorted[index])
+    }
+
+    private static func machineName() -> String {
+        var system = utsname()
+        uname(&system)
+        return withUnsafePointer(to: &system.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+    }
+
     private func startMotion() {
         guard motion.isDeviceMotionAvailable else { return }
         motion.deviceMotionUpdateInterval = 1.0 / 30
@@ -586,6 +731,23 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
                 self.skyFlat = false
             }
             self.lock.unlock()
+            let accel = data.userAcceleration
+            let mag = sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z)
+            if mag > 2.4 {
+                let now = CACurrentMediaTime()
+                self.lock.lock()
+                self.shakeTimes.append(now)
+                self.shakeTimes.removeAll { now - $0 > 0.7 }
+                let ready = self.shakeTimes.count >= 2 && now - self.lastShake > 8
+                if ready {
+                    self.lastShake = now
+                    self.shakeTimes.removeAll()
+                }
+                self.lock.unlock()
+                if ready {
+                    DispatchQueue.main.async { self.sendTrace() }
+                }
+            }
         }
     }
 
@@ -599,7 +761,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private var liveHint: String {
-        "TrueDepth is live. Hold something within the start distance of the screen. Lay the screen flat, toward the sky, to slide the pins back."
+        "TrueDepth is live. Hold something within the start distance of the screen. Lay the screen flat, toward the sky, to slide the pins back. Shake to email a performance trace."
     }
 
     private var missingHint: String {

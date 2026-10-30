@@ -41,7 +41,7 @@ struct PinSceneView: UIViewRepresentable {
         private var rows = 0
         private var last = 0.0
         private var lastShown: [Float] = []
-        private var appliedLook = BoardLook.pins
+        private var appliedLook = BoardLook.chrome
         private var lastReflection: Float = -1
         private var lastBlur: Float = -1
         private var lastEnv: UIImage?
@@ -65,7 +65,7 @@ struct PinSceneView: UIViewRepresentable {
             chromeMat.metalness.contents = 0.9
             chromeMat.roughness.contents = 0.18
             shaftGeo.materials = [shaftMat]
-            capGeo.materials = [capMat]
+            capGeo.materials = [chromeMat]
             buildStudio()
         }
 
@@ -110,64 +110,56 @@ struct PinSceneView: UIViewRepresentable {
             guard let model = owner else { return }
             let dt = last == 0 ? 0 : time - last
             last = time
+            let stepStart = CACurrentMediaTime()
             let frame = model.step(dt: dt)
+            let stepMs = (CACurrentMediaTime() - stepStart) * 1000
             if frame.cols != cols || frame.rows != rows {
                 rebuild(cols: frame.cols, rows: frame.rows)
                 lastShown.removeAll(keepingCapacity: true)
             }
             let n = min(frame.shown.count, shafts.count)
             guard frame.cols > 0, frame.rows > 0, n > 0 else { return }
-            let chrome = frame.look == .chrome
-            let lookChanged = frame.look != appliedLook
-            if lookChanged {
+            if frame.look != appliedLook {
                 appliedLook = frame.look
-                capGeo.materials = [chrome ? chromeMat : capMat]
                 lastShown.removeAll(keepingCapacity: true)
-                if !chrome {
-                    scene.lightingEnvironment.contents = nil
-                    lastEnv = nil
-                }
             }
-            if chrome {
-                if abs(frame.reflection - lastReflection) > 0.005 || abs(frame.blur - lastBlur) > 0.005 {
-                    lastReflection = frame.reflection
-                    lastBlur = frame.blur
-                    chromeMat.metalness.contents = frame.reflection
-                    chromeMat.roughness.contents = max(0.02, frame.blur)
-                    scene.lightingEnvironment.intensity = CGFloat(frame.reflection) * 1.8
-                }
-                if let env = frame.env, env !== lastEnv {
-                    scene.lightingEnvironment.contents = env
-                    lastEnv = env
-                }
+            if abs(frame.reflection - lastReflection) > 0.005 || abs(frame.blur - lastBlur) > 0.005 {
+                lastReflection = frame.reflection
+                lastBlur = frame.blur
+                chromeMat.metalness.contents = frame.reflection
+                chromeMat.roughness.contents = max(0.02, frame.blur)
+                scene.lightingEnvironment.intensity = CGFloat(frame.reflection) * 1.8
+            }
+            if let env = frame.env, env !== lastEnv {
+                scene.lightingEnvironment.contents = env
+                lastEnv = env
             }
             if lastShown.count != n { lastShown = Array(repeating: -1, count: n) }
             let pitch = min(PinMath.boardW / Float(frame.cols), PinMath.boardH / Float(frame.rows))
-            let shaftR = pitch * 0.135
-            let capR = pitch * 0.34
             let ball = pitch * 0.46
+            let sceneStart = CACurrentMediaTime()
+            var updated = 0
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             for i in 0..<n {
                 let shown = frame.shown[i]
-                if !lookChanged && abs(shown - lastShown[i]) < 0.004 { continue }
+                if abs(shown - lastShown[i]) < 0.004 { continue }
+                updated += 1
                 lastShown[i] = shown
                 let h = PinMath.height(shown, scale: frame.scale)
                 let x = ((Float(i % frame.cols) + 0.5) / Float(frame.cols)) * PinMath.boardW - PinMath.boardW / 2
                 let z = PinMath.boardH / 2 - ((Float(i / frame.cols) + 0.5) / Float(frame.rows)) * PinMath.boardH
-                let shaft = shafts[i]
-                shaft.isHidden = chrome
-                if chrome {
-                    caps[i].simdPosition = SIMD3(x, h, z)
-                    caps[i].simdScale = SIMD3(ball, ball, ball)
-                } else {
-                    shaft.simdPosition = SIMD3(x, h * 0.5, z)
-                    shaft.simdScale = SIMD3(shaftR, h, shaftR)
-                    caps[i].simdPosition = SIMD3(x, h + capR * 0.62, z)
-                    caps[i].simdScale = SIMD3(capR, capR * 0.82, capR)
-                }
+                shafts[i].isHidden = true
+                caps[i].simdPosition = SIMD3(x, h, z)
+                caps[i].simdScale = SIMD3(ball, ball, ball)
             }
             CATransaction.commit()
+            model.noteFrame(
+                dt: dt,
+                stepMs: stepMs,
+                sceneMs: (CACurrentMediaTime() - sceneStart) * 1000,
+                updated: updated
+            )
         }
 
         private func metal(_ mat: SCNMaterial, rough: CGFloat, shade: CGFloat) {
