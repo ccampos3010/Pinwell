@@ -60,28 +60,51 @@ final class DepthFusion {
 
         if frames.count < 2 { return current }
         var out = [Float](repeating: 0, count: count)
-        var scratch = [Float](repeating: 0, count: frames.count)
         var matched = 0
         for i in 0..<count {
+            var a: Float = 0
+            var b: Float = 0
+            var c: Float = 0
+            var d: Float = 0
             var n = 0
             for frame in frames {
                 let z = frame[i]
                 if z > 0.05 && z < 2.5 {
-                    scratch[n] = z
+                    switch n {
+                    case 0: a = z
+                    case 1: b = z
+                    case 2: c = z
+                    default: d = z
+                    }
                     n += 1
+                    if n == 4 { break }
                 }
             }
-            guard n > 0 else { continue }
-            scratch.withUnsafeMutableBufferPointer { buf in
-                buf[0..<n].sort()
-                out[i] = buf[n / 2]
-            }
+            if n == 0 { continue }
+            out[i] = Self.median(a, b, c, d, n)
             matched += 1
         }
         lock.lock()
         agreed += matched
         lock.unlock()
         return out
+    }
+
+    private static func median(_ a: Float, _ b: Float, _ c: Float, _ d: Float, _ n: Int) -> Float {
+        if n <= 1 { return a }
+        if n == 2 { return max(a, b) }
+        if n == 3 {
+            let low = min(a, b, c)
+            let high = max(a, b, c)
+            return a + b + c - low - high
+        }
+        let lowLeft = min(a, b)
+        let highLeft = max(a, b)
+        let lowRight = min(c, d)
+        let highRight = max(c, d)
+        let lowest = min(lowLeft, lowRight)
+        let lowerMiddle = min(max(lowLeft, lowRight), min(highLeft, highRight))
+        return a + b + c + d - lowest - lowerMiddle - max(highLeft, highRight)
     }
 
     private func readTight(

@@ -22,7 +22,11 @@ struct PinSceneView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
+        uiView.isUserInteractionEnabled = false
         context.coordinator.owner = model
+        if uiView.bounds.width > 2, uiView.bounds.height > 2 {
+            context.coordinator.viewSize = uiView.bounds.size
+        }
         context.coordinator.frameCamera(viewSize: uiView.bounds.size)
         model.setViewport(uiView.bounds.size)
     }
@@ -46,6 +50,7 @@ struct PinSceneView: UIViewRepresentable {
         private var lastBlur: Float = -1
         private var lastScale: Float = -1
         private var lastEnv: UIImage?
+        var viewSize = CGSize(width: 390, height: 844)
         var owner: BoardModel?
         private let shaftGeo: SCNCylinder
         private let capGeo: SCNSphere
@@ -61,12 +66,16 @@ struct PinSceneView: UIViewRepresentable {
             super.init()
             metal(shaftMat, rough: 0.38, shade: 0.62)
             metal(capMat, rough: 0.16, shade: 0.86)
-            chromeMat.lightingModel = .physicallyBased
-            chromeMat.diffuse.contents = UIColor(white: 0.02, alpha: 1)
-            chromeMat.metalness.contents = 1.0
-            chromeMat.roughness.contents = 0.12
-            chromeMat.reflective.contents = UIColor(white: 0.7, alpha: 1)
-            chromeMat.reflective.intensity = 1.4
+            chromeMat.lightingModel = .blinn
+            chromeMat.diffuse.contents = UIColor(white: 0.72, alpha: 1)
+            chromeMat.specular.contents = UIColor(white: 0.9, alpha: 1)
+            chromeMat.shininess = 48
+            chromeMat.locksAmbientWithDiffuse = true
+            chromeMat.shaderModifiers = [
+                .surface: """
+                _surface.diffuseTexcoord = vec2(_surface.normal.x * 0.5 + 0.5, 0.5 - _surface.normal.y * 0.5);
+                """
+            ]
             shaftGeo.materials = [shaftMat]
             capGeo.materials = [chromeMat]
             buildStudio()
@@ -116,6 +125,7 @@ struct PinSceneView: UIViewRepresentable {
             let stepStart = CACurrentMediaTime()
             let frame = model.step(dt: dt)
             let stepMs = (CACurrentMediaTime() - stepStart) * 1000
+            frameCamera(viewSize: viewSize)
             if frame.cols != cols || frame.rows != rows {
                 rebuild(cols: frame.cols, rows: frame.rows)
                 lastShown.removeAll(keepingCapacity: true)
@@ -129,16 +139,14 @@ struct PinSceneView: UIViewRepresentable {
             if abs(frame.reflection - lastReflection) > 0.005 || abs(frame.blur - lastBlur) > 0.005 {
                 lastReflection = frame.reflection
                 lastBlur = frame.blur
-                chromeMat.metalness.contents = 1.0
-                chromeMat.roughness.contents = max(0.05, frame.blur * 0.45)
-                chromeMat.reflective.intensity = CGFloat(0.35 + frame.reflection * 1.3)
-                scene.lightingEnvironment.intensity = CGFloat(0.6 + frame.reflection)
+                chromeMat.specular.contents = UIColor(white: CGFloat(0.25 + frame.reflection * 0.75), alpha: 1)
+                chromeMat.shininess = CGFloat(8 + (1 - frame.blur) * 80)
+                chromeMat.emission.intensity = CGFloat(frame.reflection) * 0.45
             }
             if let env = frame.env, env !== lastEnv {
-                chromeMat.reflective.contents = env
-                scene.lightingEnvironment.contents = env
+                chromeMat.diffuse.contents = env
+                chromeMat.emission.contents = env
                 lastEnv = env
-                lastShown.removeAll(keepingCapacity: true)
             }
             if abs(frame.scale - lastScale) > 0.001 {
                 lastScale = frame.scale
@@ -236,8 +244,8 @@ struct PinSceneView: UIViewRepresentable {
                 node.eulerAngles = euler
                 scene.rootNode.addChildNode(node)
             }
-            lamp(980, SCNVector3(-1.15, 0.15, 0))
-            lamp(260, SCNVector3(-0.4, 2.2, 0))
+            lamp(360, SCNVector3(-1.15, 0.15, 0))
+            lamp(90, SCNVector3(-0.4, 2.2, 0))
         }
 
         private func rebuild(cols: Int, rows: Int) {

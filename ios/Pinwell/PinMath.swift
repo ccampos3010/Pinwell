@@ -67,10 +67,11 @@ enum PinMath {
 
     static let colorFarM: Float = 1.2
 
+    /// Close objects push the balls down. Far, or nothing in range, leaves them up.
     static func height(_ shown: Float, scale: Float) -> Float {
         let t = min(1, max(0, shown))
         let s = min(2, max(0.1, scale))
-        return minHeight + t * travel * s
+        return minHeight + (1 - t) * travel * s
     }
 }
 

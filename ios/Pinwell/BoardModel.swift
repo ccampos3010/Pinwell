@@ -475,12 +475,12 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
         let faceInView = simd_mul(frame.camera.viewMatrix(for: .portrait), face.transform)
         let p = faceInView.columns.3
         let distance = min(0.9, max(0.18, abs(p.z)))
-        let right = min(0.12, max(-0.12, p.x))
-        let up = min(0.12, max(-0.12, p.y))
+        let right = min(0.28, max(-0.28, p.x))
+        let up = min(0.28, max(-0.28, p.y))
         lock.lock()
-        viewerDistance += (distance - viewerDistance) * 0.2
-        viewerRight += (right - viewerRight) * 0.2
-        viewerUp += (up - viewerUp) * 0.2
+        viewerDistance += (distance - viewerDistance) * 0.45
+        viewerRight += (right - viewerRight) * 0.45
+        viewerUp += (up - viewerUp) * 0.45
         lock.unlock()
     }
 
@@ -599,7 +599,7 @@ final class BoardModel: NSObject, ObservableObject, ARSessionDelegate {
 
     private func captureReflection(_ frame: ARFrame) {
         let now = CACurrentMediaTime()
-        if now - lastReflectionCapture < 1.0 / 12 { return }
+        if now - lastReflectionCapture < 1.0 / 6 { return }
         lastReflectionCapture = now
         let image = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.rightMirrored)
         let bounds = image.extent.integral

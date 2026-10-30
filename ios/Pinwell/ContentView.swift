@@ -9,22 +9,28 @@ struct ContentView: View {
     @State private var captureNote = ""
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            ZStack {
-                PinSceneView(model: model)
+        ZStack {
+            PinSceneView(model: model)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .opacity(model.look == .depth ? 0 : 1)
+            if model.look == .depth, let image = model.depthImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
                     .ignoresSafeArea()
-                    .opacity(model.look == .depth ? 0 : 1)
-                if model.look == .depth, let image = model.depthImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                }
+                    .allowsHitTesting(false)
             }
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) { model.togglePinsLock() }
-            .onTapGesture { reveal() }
+            Color.clear
+                .contentShape(Rectangle())
+                .allowsHitTesting(!showControls)
+                .onTapGesture(count: 2) { model.togglePinsLock() }
+                .onTapGesture { reveal() }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
             controls
                 .opacity(showControls ? 1 : 0)
                 .allowsHitTesting(showControls)
@@ -41,7 +47,6 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(.easeInOut(duration: 0.35), value: showControls)
         .background(Color(red: 0.05, green: 0.045, blue: 0.04))
         .preferredColorScheme(.dark)
         .onAppear { model.start() }
@@ -66,7 +71,8 @@ struct ContentView: View {
     }
 
     private var controls: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
             Picker("View", selection: Binding(
                 get: { model.look },
                 set: { model.setLook($0); reveal() }
@@ -136,7 +142,7 @@ struct ContentView: View {
                     onEditingChanged: hold(_:)
                 )
             }
-            Text("Balls rise between Start and End. Scale is how far they travel in that range. In the depth view, blue is farther than both, gray is between them, and red is closer.")
+            Text("Close objects push the balls down, between End and Start. Scale is how far they travel. In the depth view, blue is farther than both, gray is between them, and red is closer.")
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.55))
             labeled("Scale", value: String(format: "%.1f", model.pinScale)) {
@@ -177,10 +183,12 @@ struct ContentView: View {
             Text("Shake the phone to email a trace with the front camera and depth.")
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.55))
+            }
         }
+        .frame(maxHeight: 520)
         .tint(Color(white: 0.82))
         .padding(16)
-        .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 18))
+        .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 18))
         .padding(.horizontal, 14)
         .padding(.bottom, 16)
     }
